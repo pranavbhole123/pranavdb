@@ -30,6 +30,44 @@ func (k IntKey) Equal(other Key) bool {
 	return k == ok
 }
 
+// FloatKey is an implementation of Key for floating-point numbers.
+type FloatKey float64
+
+func (k FloatKey) Less(other Key) bool {
+	ok, okType := other.(FloatKey)
+	if !okType {
+		panic("type mismatch in FloatKey.Less")
+	}
+	return k < ok
+}
+
+func (k FloatKey) Equal(other Key) bool {
+	ok, okType := other.(FloatKey)
+	if !okType {
+		panic("type mismatch in FloatKey.Equal")
+	}
+	return k == ok
+}
+
+// StringKey is an implementation of Key for strings.
+type StringKey string
+
+func (k StringKey) Less(other Key) bool {
+	ok, okType := other.(StringKey)
+	if !okType {
+		panic("type mismatch in StringKey.Less")
+	}
+	return k < ok
+}
+
+func (k StringKey) Equal(other Key) bool {
+	ok, okType := other.(StringKey)
+	if !okType {
+		panic("type mismatch in StringKey.Equal")
+	}
+	return k == ok
+}
+
 // Node is the interface for all B+ tree nodes.
 type Node[V any] interface {
 	isLeaf() bool
