@@ -9,7 +9,8 @@ const (
 // IndexPage represents one fixed-size index page containing raw B+ tree node data.
 // Each index page stores exactly one complete node (internal or leaf).
 type IndexPage struct {
-	Data [PageSize]byte
+	Deleted bool     //bool is of one byte
+	Data [PageSize-1]byte
 }
 
 // NewIndexPage returns a zeroed index page.

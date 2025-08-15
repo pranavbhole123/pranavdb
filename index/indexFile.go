@@ -9,49 +9,44 @@ import (
 )
 
 const (
-	// File header constants
-	MagicNumber = 0x42504C55 // "B+LU" in hex
+	MagicNumber = 0x42504C55 // "B+LU"
 	Version     = 1
-	HeaderSize  = 512 // First block size
+	HeaderSize  = 512
 
-	// Page types for index pages
 	PageTypeHeader = 0
 	PageTypeNode   = 1
 )
 
-// IndexFile manages a disk-based B+ tree index file
 type IndexFile[K tree.Key, V any] struct {
-	file       *os.File
-	rootPageID uint32
-	order      int
-	codec      *page.IndexPageCodec[K, V]
+	file          *os.File
+	rootPageID    uint32
+	order         int
+	firstFreePage uint32 // ✅ Keep in-memory free list head
+	codec         *page.IndexPageCodec[K, V]
 }
 
-// FileHeader represents the header stored in the first block
 type FileHeader struct {
-	MagicNumber uint32
-	Version     uint32
-	RootPageID  uint32
-	TreeOrder   uint32
+	MagicNumber    uint32
+	Version        uint32
+	RootPageID     uint32
+	TreeOrder      uint32
+	FirstFreeListID uint32
 }
 
-// NewIndexFile creates a new index file with the given order
 func NewIndexFile[K tree.Key, V any](filepath string, order int) (*IndexFile[K, V], error) {
-	// Create the file
 	file, err := os.Create(filepath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create index file: %w", err)
 	}
 
-	// Initialize the index file
 	indexFile := &IndexFile[K, V]{
-		file:       file,
-		rootPageID: 0, // No root initially
-		order:      order,
-		codec:      page.NewIndexPageCodec[K, V](),
+		file:          file,
+		rootPageID:    0,
+		order:         order,
+		firstFreePage: 0, // no free pages yet
+		codec:         page.NewIndexPageCodec[K, V](),
 	}
 
-	// Write the initial header
 	if err := indexFile.writeHeader(); err != nil {
 		file.Close()
 		return nil, fmt.Errorf("failed to write header: %w", err)
@@ -60,7 +55,6 @@ func NewIndexFile[K tree.Key, V any](filepath string, order int) (*IndexFile[K, 
 	return indexFile, nil
 }
 
-// OpenIndexFile opens an existing index file
 func OpenIndexFile[K tree.Key, V any](filepath string) (*IndexFile[K, V], error) {
 	file, err := os.OpenFile(filepath, os.O_RDWR, 0666)
 	if err != nil {
@@ -72,7 +66,6 @@ func OpenIndexFile[K tree.Key, V any](filepath string) (*IndexFile[K, V], error)
 		codec: page.NewIndexPageCodec[K, V](),
 	}
 
-	// Read the header
 	if err := indexFile.readHeader(); err != nil {
 		file.Close()
 		return nil, fmt.Errorf("failed to read header: %w", err)
@@ -81,7 +74,6 @@ func OpenIndexFile[K tree.Key, V any](filepath string) (*IndexFile[K, V], error)
 	return indexFile, nil
 }
 
-// Close closes the index file and writes the final header
 func (idx *IndexFile[K, V]) Close() error {
 	if err := idx.writeHeader(); err != nil {
 		return fmt.Errorf("failed to write final header: %w", err)
@@ -89,47 +81,39 @@ func (idx *IndexFile[K, V]) Close() error {
 	return idx.file.Close()
 }
 
-// writeHeader writes the file header to the first block
 func (idx *IndexFile[K, V]) writeHeader() error {
 	header := FileHeader{
-		MagicNumber: MagicNumber,
-		Version:     Version,
-		RootPageID:  idx.rootPageID,
-		TreeOrder:   uint32(idx.order),
+		MagicNumber:    MagicNumber,
+		Version:        Version,
+		RootPageID:     idx.rootPageID,
+		TreeOrder:      uint32(idx.order),
+		FirstFreeListID: idx.firstFreePage,
 	}
 
-	// Create header block
 	headerBlock := make([]byte, HeaderSize)
-
-	// Write header fields
 	binary.LittleEndian.PutUint32(headerBlock[0:4], header.MagicNumber)
 	binary.LittleEndian.PutUint32(headerBlock[4:8], header.Version)
 	binary.LittleEndian.PutUint32(headerBlock[8:12], header.RootPageID)
 	binary.LittleEndian.PutUint32(headerBlock[12:16], header.TreeOrder)
+	binary.LittleEndian.PutUint32(headerBlock[16:20], header.FirstFreeListID)
 
-	// Rest is reserved (zeroed)
-
-	// Write to file
 	_, err := idx.file.WriteAt(headerBlock, 0)
 	return err
 }
 
-// readHeader reads the file header from the first block
 func (idx *IndexFile[K, V]) readHeader() error {
 	headerBlock := make([]byte, HeaderSize)
-
 	_, err := idx.file.ReadAt(headerBlock, 0)
 	if err != nil {
 		return err
 	}
 
-	// Read header fields
 	magic := binary.LittleEndian.Uint32(headerBlock[0:4])
 	version := binary.LittleEndian.Uint32(headerBlock[4:8])
-	rootPageID := binary.LittleEndian.Uint32(headerBlock[8:12])
-	treeOrder := binary.LittleEndian.Uint32(headerBlock[12:16])
+	idx.rootPageID = binary.LittleEndian.Uint32(headerBlock[8:12])
+	idx.order = int(binary.LittleEndian.Uint32(headerBlock[12:16]))
+	idx.firstFreePage = binary.LittleEndian.Uint32(headerBlock[16:20])
 
-	// Validate header
 	if magic != MagicNumber {
 		return fmt.Errorf("invalid magic number: expected %x, got %x", MagicNumber, magic)
 	}
@@ -137,36 +121,103 @@ func (idx *IndexFile[K, V]) readHeader() error {
 		return fmt.Errorf("unsupported version: %d", version)
 	}
 
-	idx.rootPageID = rootPageID
-	idx.order = int(treeOrder)
-
 	return nil
 }
 
-// allocatePage allocates a new page and returns its page ID
+
+// ✅ Allocate page (reuse free list if possible)
 func (idx *IndexFile[K, V]) allocatePage() (uint32, error) {
-	// Get file size to determine next page ID
+	// 1. Read the free list head from header
+	freeHead := idx.firstFreePage
+
+	//fmt.Print("freehead ******************************************************")
+	fmt.Println(freeHead)
+	// 2. If there is a free page, reuse it
+	if freeHead != 0 { 
+		// Read next free page pointer from that page
+		nextFree, err := idx.readFreeListPointer(freeHead)
+		if err != nil {
+			return 0, err
+		}
+		// the logic for making the bool 0 is already written in the write node if that is called the delete gets written to 0
+		// Update the free list head to point to the next free page
+		idx.firstFreePage = nextFree
+		err = idx.writeHeader()
+		if err != nil{
+			return 0, err
+		}
+
+		// Return the reused page
+		return freeHead, nil
+	}
+
+	// 3. Otherwise, append a new page at the end
 	info, err := idx.file.Stat()
 	if err != nil {
 		return 0, err
 	}
+	nextPageID := max(uint32((info.Size() - HeaderSize) / page.PageSize),1)
 
-	// Calculate next page ID (after header block)
-	nextPageID := uint32((info.Size()-HeaderSize)/page.PageSize) + 1
-
-	// Extend file if needed
-	requiredSize := int64(HeaderSize + (nextPageID+1)*page.PageSize)
-	if info.Size() < requiredSize {
-		// Write a zero page to extend the file
-		zeroPage := make([]byte, page.PageSize)
-		_, err = idx.file.WriteAt(zeroPage, int64(HeaderSize+nextPageID*page.PageSize))
-		if err != nil {
-			return 0, err
-		}
+	zeroPage := make([]byte, page.PageSize)
+	_, err = idx.file.WriteAt(zeroPage, int64(HeaderSize+int64(nextPageID)*page.PageSize))
+	if err != nil {
+		return 0, err
 	}
-
 	return nextPageID, nil
 }
+
+
+
+func (idx *IndexFile[K, V]) freePage(pageID uint32) error {
+	// build page buffer
+	//fmt.Print("pageid ******************************************************")
+	fmt.Println(pageID)
+	buf := make([]byte, page.PageSize)
+
+	// mark as deleted
+	buf[0] = 1
+
+	// write next pointer at buf[1:5]
+	binary.LittleEndian.PutUint32(buf[1:5], idx.firstFreePage)
+
+	// write the page buffer to disk at the correct offset
+	offset := int64(HeaderSize) + int64(pageID)*int64(page.PageSize)
+	if _, err := idx.file.WriteAt(buf, offset); err != nil {
+		return fmt.Errorf("freePage: write failed for page %d: %w", pageID, err)
+	}
+
+	// update in-memory head and persist header
+	idx.firstFreePage = pageID
+	if err := idx.writeHeader(); err != nil {
+		return fmt.Errorf("freePage: writeHeader failed: %w", err)
+	}
+
+	return nil
+}
+
+
+// Helper to read next free list pointer from a free page
+func (idx *IndexFile[K, V]) readFreeListPointer(pageID uint32) (uint32, error) {
+	// Buffer for flag + next free page ID
+	buf := make([]byte, 5) // 1 byte for bool + 4 bytes for uint32
+	offset := int64(HeaderSize) + int64(pageID)*page.PageSize
+
+	_, err := idx.file.ReadAt(buf, offset)
+	if err != nil {
+		return 0, err
+	}
+
+	// First byte is the deleted flag
+	deleted := buf[0] != 0
+	if !deleted {
+		return 0, fmt.Errorf("page %d is not marked as free", pageID)
+	}
+
+	// Next 4 bytes are the next free page pointer
+	nextFree := binary.LittleEndian.Uint32(buf[1:5])
+	return nextFree, nil
+}
+
 
 // writeNode writes a node to a specific page
 func (idx *IndexFile[K, V]) writeNode(node tree.Node[V], pageID uint32) error {
@@ -176,54 +227,64 @@ func (idx *IndexFile[K, V]) writeNode(node tree.Node[V], pageID uint32) error {
 		return fmt.Errorf("failed to encode node: %w", err)
 	}
 
-	// Create index page
-	indexPage := page.NewIndexPage()
-	indexPage.SetData(data)
+	// Sanity check: encoded payload must fit in page minus 1 byte for Deleted flag
+	if len(data) > page.PageSize-1 {
+		return fmt.Errorf("encoded node size %d exceeds page payload capacity %d", len(data), page.PageSize-1)
+	}
 
-	// Write to disk
-	offset := int64(HeaderSize + pageID*page.PageSize)
-	_, err = idx.file.WriteAt(indexPage.GetData(), offset)
-	return err
+	// Build full physical page buffer: first byte = deleted flag (0), then payload
+	buf := make([]byte, page.PageSize)
+	buf[0] = 0 // not deleted
+	if len(data) > 0 {
+		copy(buf[1:], data)
+	}
+
+	// Write the full page to disk
+	offset := int64(HeaderSize+ int64(pageID*page.PageSize))
+	if _, err := idx.file.WriteAt(buf, offset); err != nil {
+		return fmt.Errorf("failed to write node to page %d: %w", pageID, err)
+	}
+	return nil
 }
 
-// readNode reads a node from a specific page
 func (idx *IndexFile[K, V]) readNode(pageID uint32) (tree.Node[V], error) {
-	// Read from disk
-	offset := int64(HeaderSize + pageID*page.PageSize)
-	data := make([]byte, page.PageSize)
+	// Read the full page into buffer
+	buf := make([]byte, page.PageSize)
+	offset := int64(HeaderSize + int64(pageID*page.PageSize))
 
-	_, err := idx.file.ReadAt(data, offset)
+	_, err := idx.file.ReadAt(buf, offset)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read page %d: %w", pageID, err)
 	}
 
-	// Decode the node
-	decoded, err := idx.codec.Decode(data)
+	// Check deleted flag (first byte)
+	if buf[0] != 0 {
+		return nil, fmt.Errorf("page %d is marked deleted", pageID)
+	}
+
+	// Pass payload (skipping deleted flag) to codec for decoding
+	payload := buf[1:]
+
+	decoded, err := idx.codec.Decode(payload)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode node from page %d: %w", pageID, err)
 	}
-
-	// Cast to tree.Node[V]
 	node, ok := decoded.(tree.Node[V])
 	if !ok {
-		return nil, fmt.Errorf("decoded object is not a tree node")
+		return nil, fmt.Errorf("decoded object is not a tree node (page %d)", pageID)
 	}
-
 	return node, nil
 }
 
-// SetRoot updates the root page ID and writes it to disk
 func (idx *IndexFile[K, V]) SetRoot(pageID uint32) error {
 	idx.rootPageID = pageID
 	return idx.writeHeader()
 }
 
-// GetRoot returns the current root page ID
 func (idx *IndexFile[K, V]) GetRoot() uint32 {
 	return idx.rootPageID
 }
 
-// GetOrder returns the tree order
 func (idx *IndexFile[K, V]) GetOrder() int {
 	return idx.order
 }

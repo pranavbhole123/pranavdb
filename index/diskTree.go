@@ -335,26 +335,6 @@ func (t *DiskTree[K, V]) RangeSearch(startKey, endKey K) ([]tree.LeafPair[K, V],
 
 	// Traverse leaf nodes and collect results
 	for currentLeaf != nil {
-		// Skip deleted leaf nodes
-		if currentLeaf.IsDeleted() {
-			// Move to next leaf
-			if currentLeaf.GetNextPage() != 0 {
-				nextLeaf, err := t.indexFile.readNode(currentLeaf.GetNextPage())
-				if err != nil {
-					return nil, fmt.Errorf("failed to load next leaf: %w", err)
-				}
-				nextLeafNode, ok := nextLeaf.(*tree.LeafNode[K, V])
-				if !ok {
-					return nil, errors.New("expected leaf node")
-				}
-				currentLeaf = nextLeafNode
-				continue
-			} else {
-				currentLeaf = nil // No more leaves
-				break
-			}
-		}
-
 		for _, pair := range currentLeaf.Pairs {
 			// Check if key is in range [startKey, endKey)
 			if !pair.K.Less(startKey) && pair.K.Less(endKey) {
@@ -386,90 +366,10 @@ func (t *DiskTree[K, V]) RangeSearch(startKey, endKey K) ([]tree.LeafPair[K, V],
 }
 
 // Min returns the minimum key-value pair in the tree
-func (t *DiskTree[K, V]) Min() (*tree.LeafPair[K, V], error) {
-	rootPageID := t.indexFile.GetRoot()
-	if rootPageID == 0 {
-		return nil, errors.New("tree is empty")
-	}
 
-	// Load root node
-	root, err := t.indexFile.readNode(rootPageID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load root node: %w", err)
-	}
-
-	// Find leftmost leaf
-	leftmostLeaf, err := t.findLeftmostLeaf(root)
-	if err != nil {
-		return nil, err
-	}
-
-	// Skip deleted leaf nodes
-	for leftmostLeaf != nil && leftmostLeaf.IsDeleted() {
-		if leftmostLeaf.GetNextPage() != 0 {
-			nextLeaf, err := t.indexFile.readNode(leftmostLeaf.GetNextPage())
-			if err != nil {
-				return nil, fmt.Errorf("failed to load next leaf: %w", err)
-			}
-			nextLeafNode, ok := nextLeaf.(*tree.LeafNode[K, V])
-			if !ok {
-				return nil, errors.New("expected leaf node")
-			}
-			leftmostLeaf = nextLeafNode
-		} else {
-			return nil, errors.New("no non-deleted leaves found")
-		}
-	}
-
-	if leftmostLeaf == nil || len(leftmostLeaf.Pairs) == 0 {
-		return nil, errors.New("leftmost leaf is empty")
-	}
-
-	return &leftmostLeaf.Pairs[0], nil
-}
 
 // Max returns the maximum key-value pair in the tree
-func (t *DiskTree[K, V]) Max() (*tree.LeafPair[K, V], error) {
-	rootPageID := t.indexFile.GetRoot()
-	if rootPageID == 0 {
-		return nil, errors.New("tree is empty")
-	}
 
-	// Load root node
-	root, err := t.indexFile.readNode(rootPageID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load root node: %w", err)
-	}
-
-	// Find rightmost leaf
-	rightmostLeaf, err := t.findRightmostLeaf(root)
-	if err != nil {
-		return nil, err
-	}
-
-	// Skip deleted leaf nodes
-	for rightmostLeaf != nil && rightmostLeaf.IsDeleted() {
-		if rightmostLeaf.GetPrevPage() != 0 {
-			prevLeaf, err := t.indexFile.readNode(rightmostLeaf.GetPrevPage())
-			if err != nil {
-				return nil, fmt.Errorf("failed to load previous leaf: %w", err)
-			}
-			prevLeafNode, ok := prevLeaf.(*tree.LeafNode[K, V])
-			if !ok {
-				return nil, errors.New("expected leaf node")
-			}
-			rightmostLeaf = prevLeafNode
-		} else {
-			return nil, errors.New("no non-deleted leaves found")
-		}
-	}
-
-	if rightmostLeaf == nil || len(rightmostLeaf.Pairs) == 0 {
-		return nil, errors.New("rightmost leaf is empty")
-	}
-
-	return &rightmostLeaf.Pairs[len(rightmostLeaf.Pairs)-1], nil
-}
 
 // findLeftmostLeaf finds the leftmost leaf node starting from the given node
 func (t *DiskTree[K, V]) findLeftmostLeaf(node tree.Node[V]) (*tree.LeafNode[K, V], error) {
@@ -565,10 +465,7 @@ func (t *DiskTree[K, V]) dfs(key K, node tree.Node[V]) (V, error) {
 	}
 
 	// Check if the leaf node is deleted
-	if leaf.IsDeleted() {
-		var zero V
-		return zero, errors.New("key not found (node deleted)")
-	}
+	
 
 	// Binary search in leaf pairs
 	ind := t.leafBinarySearch(key, leaf.Pairs)
@@ -681,9 +578,7 @@ func (t *DiskTree[K, V]) Print() error {
 		// Check if it's a leaf node using type assertion
 		if leaf, ok := item.node.(*tree.LeafNode[K, V]); ok {
 			deletedStatus := ""
-			if leaf.IsDeleted() {
-				deletedStatus = " [DELETED]"
-			}
+			/////////////////////////////////////////////////////////////////////////////////////////////////////////////
 			fmt.Printf("[Page %d%s: ", item.pageID, deletedStatus)
 			for _, pair := range leaf.Pairs {
 				fmt.Printf("(%v: %v) ", pair.K, pair.Value)
@@ -696,9 +591,7 @@ func (t *DiskTree[K, V]) Print() error {
 				return errors.New("expected an internal node")
 			}
 			deletedStatus := ""
-			if interm.IsDeleted() {
-				deletedStatus = " [DELETED]"
-			}
+			//////////////////////////////////////////////////////////////////////////////////////////////////////////////
 			fmt.Printf("[Page %d%s: ", item.pageID, deletedStatus)
 			for _, k := range interm.Keys {
 				fmt.Printf("%v ", k)
@@ -752,7 +645,8 @@ func (t *DiskTree[K, V]) Delete(key K) error {
 					return err
 				}
 				// Optionally free old root page
-				tryFreePage(t.indexFile, rootPageID)
+				//tryFreePage(t.indexFile, rootPageID)
+				t.indexFile.freePage(rootPageID)
 			}
 		}
 	}
@@ -1071,11 +965,17 @@ func (t *DiskTree[K, V]) mergeLeft(parent *tree.IntermNode[K, V], parentPageID u
 		}
 
 		// mark child deleted and try free
-		childLeaf.SetDeleted(true)
+		// we need to make a function to add  the page to the 
+		
+		//childLeaf.SetDeleted(true)
+		//t.indexFile.freePage(childLeaf.GetPageID())
+
+
 		if err := t.indexFile.writeNode(childLeaf, childPageID); err != nil {
 			return err
 		}
-		tryFreePage(t.indexFile, childPageID)
+		//tryFreePage(t.indexFile, childPageID)
+		t.indexFile.freePage(childPageID)
 		return nil
 	}
 
@@ -1092,11 +992,14 @@ func (t *DiskTree[K, V]) mergeLeft(parent *tree.IntermNode[K, V], parentPageID u
 		return err
 	}
 
-	childInterm.SetDeleted(true)
+	//childInterm.SetDeleted(true)
+	//t.indexFile.freePage(childInterm.GetPageID())
+
 	if err := t.indexFile.writeNode(childInterm, childPageID); err != nil {
 		return err
 	}
-	tryFreePage(t.indexFile, childPageID)
+	//tryFreePage(t.indexFile, childPageID)
+	t.indexFile.freePage(childPageID)
 	return nil
 }
 
@@ -1137,11 +1040,14 @@ func (t *DiskTree[K, V]) mergeRight(parent *tree.IntermNode[K, V], parentPageID 
 		}
 
 		// mark right deleted and try free
-		rightLeaf.SetDeleted(true)
+		//rightLeaf.SetDeleted(true)
+		//t.indexFile.freePage(rightLeaf.GetPageID())
+
 		if err := t.indexFile.writeNode(rightLeaf, rightPageID); err != nil {
 			return err
 		}
-		tryFreePage(t.indexFile, rightPageID)
+		//tryFreePage(t.indexFile, rightPageID)
+		t.indexFile.freePage(rightPageID)
 		return nil
 	}
 
@@ -1158,65 +1064,21 @@ func (t *DiskTree[K, V]) mergeRight(parent *tree.IntermNode[K, V], parentPageID 
 		return err
 	}
 
-	rightInterm.SetDeleted(true)
+	//rightInterm.SetDeleted(true)
+	//t.indexFile.freePage(rightInterm.GetPageID())
+
+
 	if err := t.indexFile.writeNode(rightInterm, rightPageID); err != nil {
 		return err
 	}
-	tryFreePage(t.indexFile, rightPageID)
+	//tryFreePage(t.indexFile, rightPageID)
+	t.indexFile.freePage(rightPageID)
+
 	return nil
 }
 
-// replaceKeyInParent searches from root and replaces first occurrence of oldKey that separates to childPageID with newKey.
-func (t *DiskTree[K, V]) replaceKeyInParent(childPageID uint32, oldKey, newKey K) error {
-	rootID := t.indexFile.GetRoot()
-	if rootID == 0 {
-		return errors.New("empty tree")
-	}
 
-	// BFS/DFS to find parent that has pointer to childPageID
-	var stack []uint32
-	stack = append(stack, rootID)
-	for len(stack) > 0 {
-		p := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-		n, err := t.indexFile.readNode(p)
-		if err != nil {
-			return err
-		}
-		interm, ok := n.(*tree.IntermNode[K, V])
-		if !ok {
-			continue
-		}
-		// check pointers
-		for i, ptr := range interm.Pointers {
-			if ptr == childPageID {
-				// if separator to the right exists and equals oldKey, replace
-				// The separator key that separates left ptr i and right ptr i+1 is interm.Keys[i]
-				if i > 0 && i-1 < len(interm.Keys) && interm.Keys[i-1].Equal(oldKey) {
-					interm.Keys[i-1] = newKey
-					return t.indexFile.writeNode(interm, p)
-				}
-				// also check if i < len(Keys) and Keys[i] equals oldKey (case when child is left pointer)
-				if i < len(interm.Keys) && interm.Keys[i].Equal(oldKey) {
-					interm.Keys[i] = newKey
-					return t.indexFile.writeNode(interm, p)
-				}
-			}
-		}
-		// push children to stack
-		for _, ptr := range interm.Pointers {
-			stack = append(stack, ptr)
-		}
-	}
-	return nil
-}
 
-// tryFreePage attempts to free a page via indexFile.FreePage if available, else marks the node deleted.
-func tryFreePage(indexFile any, pageID uint32) {
-	if f, ok := indexFile.(interface{ FreePage(uint32) error }); ok {
-		_ = f.FreePage(pageID)
-	}
-}
 
 // ---------- small helpers for slice removal/insert on concrete types ----------
 

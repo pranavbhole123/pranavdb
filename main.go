@@ -19,7 +19,7 @@ func main() {
 	fmt.Println("Creating new disk-based B+ tree...")
 
 	// Create a new disk-based B+ tree with order 3
-	diskTree, err := index.NewDiskTree[tree.IntKey, string](testFile, 3)
+	diskTree, err := index.NewDiskTree[tree.IntKey, string](testFile, 5)
 	if err != nil {
 		log.Fatalf("Failed to create disk tree: %v", err)
 	}
@@ -104,26 +104,10 @@ func main() {
 
 	fmt.Println("\n=== Testing Min/Max Operations ===")
 
-	// Test minimum key
-	minPair, err := diskTree.Min()
-	if err != nil {
-		fmt.Printf("Min operation failed: %v\n", err)
-	} else {
-		fmt.Printf("Minimum key: %d with value: %s\n", minPair.K, minPair.Value)
-	}
 
-	// Test maximum key
-	maxPair, err := diskTree.Max()
-	if err != nil {
-		fmt.Printf("Max operation failed: %v\n", err)
-	} else {
-		fmt.Printf("Maximum key: %d with value: %s\n", maxPair.K, maxPair.Value)
-	}
-
-	fmt.Println("\n=== Testing Delete Operations ===")
 
 	// Test deletion of existing keys
-	deleteTests := []tree.IntKey{15, 5, 25}
+	deleteTests := []tree.IntKey{10,5}
 	for _, deleteKey := range deleteTests {
 		fmt.Printf("Deleting key %d...\n", deleteKey)
 		if err := diskTree.Delete(deleteKey); err != nil {
@@ -159,23 +143,7 @@ func main() {
 	}
 
 	// Test Min/Max after deletion
-	fmt.Println("\n=== Testing Min/Max After Deletion ===")
-	minPairAfter, err := diskTree.Min()
-	if err != nil {
-		fmt.Printf("Min operation after deletion failed: %v\n", err)
-	} else {
-		fmt.Printf("Minimum key after deletion: %d with value: %s\n", minPairAfter.K, minPairAfter.Value)
-	}
-
-	maxPairAfter, err := diskTree.Max()
-	if err != nil {
-		fmt.Printf("Max operation after deletion failed: %v\n", err)
-	} else {
-		fmt.Printf("Maximum key after deletion: %d with value: %s\n", maxPairAfter.K, maxPairAfter.Value)
-	}
-
-	fmt.Println("\n=== Testing Tree Persistence ===")
-
+	
 	// Close the current tree
 	diskTree.Close()
 
@@ -204,6 +172,20 @@ func main() {
 		log.Printf("Failed to print reopened tree: %v", err)
 	}
 
+
+	// now we test the working of our free list try inserting 31 and if the pageid 2 is use we kknow our free list is working
+
+	_ = existingTree.Insert(tree.IntKey(31), "thirtyone")
+	_ = existingTree.Insert(tree.IntKey(32), "thirtyone")
+	_ = existingTree.Insert(tree.IntKey(33), "thirtyone")
+	err = existingTree.Insert(tree.IntKey(34), "thirtyone")
+
+	if err != nil{
+		fmt.Println(err)
+	}
+	if err := existingTree.Print(); err != nil {
+		log.Printf("Failed to print reopened tree: %v", err)
+	}
 	fmt.Println("\n=== All Tests Completed Successfully! ===")
 }
 

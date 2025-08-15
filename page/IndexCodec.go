@@ -40,8 +40,8 @@ func (p *IndexPageCodec[K, V]) Encode(obj interface{}) ([]byte, error) {
 
 // encodeNode encodes a specific tree node (internal method)
 func (p *IndexPageCodec[K, V]) encodeNode(n tree.Node[V]) ([]byte, error) {
-	// check whether its interim node or leaf node then accordingly encode the data keep in mind that we also
-	// need to decode it so and return the slice of byte
+	// check whether it's internal node or leaf node then accordingly encode the data
+	// we also need to decode it so keep format consistent
 
 	if n == nil {
 		return nil, nil
@@ -61,13 +61,6 @@ func (p *IndexPageCodec[K, V]) encodeNode(n tree.Node[V]) ([]byte, error) {
 		binary.LittleEndian.PutUint32(pageIDBytes, leaf.GetPageID())
 		buf = append(buf, pageIDBytes...)
 
-		// Deletion bit (1 byte)
-		if leaf.IsDeleted() {
-			buf = append(buf, 1)
-		} else {
-			buf = append(buf, 0)
-		}
-
 		// Number of pairs (2 bytes)
 		numPairs := uint16(len(leaf.Pairs))
 		pairCountBytes := make([]byte, 2)
@@ -83,8 +76,7 @@ func (p *IndexPageCodec[K, V]) encodeNode(n tree.Node[V]) ([]byte, error) {
 			}
 			buf = append(buf, keyBytes...)
 
-			// Encode value - we need to handle the generic V type
-			// For now, assuming string values
+			// Encode value - currently assuming string values
 			if strValue, ok := any(pair.Value).(string); ok {
 				valueLen := uint16(len(strValue))
 				valueLenBytes := make([]byte, 2)
@@ -92,7 +84,7 @@ func (p *IndexPageCodec[K, V]) encodeNode(n tree.Node[V]) ([]byte, error) {
 				buf = append(buf, valueLenBytes...)
 				buf = append(buf, []byte(strValue)...)
 			} else {
-				// For other value types, we'll need to implement specific encoding
+				// For other value types, implement encoding later
 				return nil, errors.New("unsupported value type for encoding")
 			}
 		}
@@ -117,13 +109,6 @@ func (p *IndexPageCodec[K, V]) encodeNode(n tree.Node[V]) ([]byte, error) {
 		pageIDBytes := make([]byte, 4)
 		binary.LittleEndian.PutUint32(pageIDBytes, interm.GetPageID())
 		buf = append(buf, pageIDBytes...)
-
-		// Deletion bit (1 byte)
-		if interm.IsDeleted() {
-			buf = append(buf, 1)
-		} else {
-			buf = append(buf, 0)
-		}
 
 		// Number of keys (2 bytes)
 		numKeys := uint16(len(interm.Keys))
@@ -229,22 +214,17 @@ func (p *IndexPageCodec[K, V]) Decode(data []byte) (interface{}, error) {
 
 // decodeLeafNode decodes a leaf node from byte data
 func (p *IndexPageCodec[K, V]) decodeLeafNode(data []byte) (*tree.LeafNode[K, V], error) {
-	if len(data) < 7 { // 1 byte type + 4 bytes pageID + 1 byte deleted + 2 bytes numPairs
+	// data passed in already skips the node type byte
+	// need at least: pageID(4) + numPairs(2)
+	if len(data) < 6 {
 		return nil, errors.New("insufficient data for leaf node")
 	}
 
 	offset := 0
 
-	// Skip node type (already read)
-	offset += 0
-
 	// Read page ID (4 bytes)
 	pageID := binary.LittleEndian.Uint32(data[offset : offset+4])
 	offset += 4
-
-	// Read deletion bit (1 byte)
-	deleted := data[offset] != 0
-	offset += 1
 
 	// Read number of pairs (2 bytes)
 	numPairs := binary.LittleEndian.Uint16(data[offset : offset+2])
@@ -254,7 +234,6 @@ func (p *IndexPageCodec[K, V]) decodeLeafNode(data []byte) (*tree.LeafNode[K, V]
 		Pairs: make([]tree.LeafPair[K, V], 0, numPairs),
 	}
 	leaf.SetPageID(pageID)
-	leaf.SetDeleted(deleted)
 
 	// Decode each key-value pair
 	for i := uint16(0); i < numPairs; i++ {
@@ -307,22 +286,17 @@ func (p *IndexPageCodec[K, V]) decodeLeafNode(data []byte) (*tree.LeafNode[K, V]
 
 // decodeInternalNode decodes an internal node from byte data
 func (p *IndexPageCodec[K, V]) decodeInternalNode(data []byte) (*tree.IntermNode[K, V], error) {
-	if len(data) < 7 { // 1 byte type + 4 bytes pageID + 1 byte deleted + 2 bytes numKeys
+	// data passed in already skips the node type byte
+	// need at least: pageID(4) + numKeys(2)
+	if len(data) < 6 {
 		return nil, errors.New("insufficient data for internal node")
 	}
 
 	offset := 0
 
-	// Skip node type (already read)
-	offset += 0
-
 	// Read page ID (4 bytes)
 	pageID := binary.LittleEndian.Uint32(data[offset : offset+4])
 	offset += 4
-
-	// Read deletion bit (1 byte)
-	deleted := data[offset] != 0
-	offset += 1
 
 	// Read number of keys (2 bytes)
 	numKeys := binary.LittleEndian.Uint16(data[offset : offset+2])
@@ -333,7 +307,6 @@ func (p *IndexPageCodec[K, V]) decodeInternalNode(data []byte) (*tree.IntermNode
 		Pointers: make([]uint32, 0, numKeys+1),
 	}
 	interm.SetPageID(pageID)
-	interm.SetDeleted(deleted)
 
 	// Decode each key
 	for i := uint16(0); i < numKeys; i++ {
