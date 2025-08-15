@@ -76,6 +76,7 @@ type IntermNode[K Key, V any] struct {
 	Pointers []uint32 // Page IDs of child nodes, len = len(Keys)+1
 	Keys     []K
 	pageID   uint32
+	deleted  bool // Indicates if this node is marked for deletion
 }
 
 func (n *IntermNode[K, V]) isLeaf() bool { return false }
@@ -83,6 +84,10 @@ func (n *IntermNode[K, V]) isLeaf() bool { return false }
 func (n *IntermNode[K, V]) GetPageID() uint32 { return n.pageID }
 
 func (n *IntermNode[K, V]) SetPageID(pageID uint32) { n.pageID = pageID }
+
+func (n *IntermNode[K, V]) IsDeleted() bool { return n.deleted }
+
+func (n *IntermNode[K, V]) SetDeleted(deleted bool) { n.deleted = deleted }
 
 // LeafPair holds a key-value pair in a leaf node.
 type LeafPair[K Key, V any] struct {
@@ -96,6 +101,7 @@ type LeafNode[K Key, V any] struct {
 	nextPage uint32 // Page ID of next leaf node
 	prevPage uint32 // Page ID of previous leaf node
 	pageID   uint32
+	deleted  bool // Indicates if this node is marked for deletion
 }
 
 func (l *LeafNode[K, V]) isLeaf() bool { return true }
@@ -111,3 +117,7 @@ func (l *LeafNode[K, V]) GetPrevPage() uint32 { return l.prevPage }
 func (l *LeafNode[K, V]) SetNextPage(nextPage uint32) { l.nextPage = nextPage }
 
 func (l *LeafNode[K, V]) SetPrevPage(prevPage uint32) { l.prevPage = prevPage }
+
+func (l *LeafNode[K, V]) IsDeleted() bool { return l.deleted }
+
+func (l *LeafNode[K, V]) SetDeleted(deleted bool) { l.deleted = deleted }

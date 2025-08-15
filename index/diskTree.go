@@ -335,6 +335,26 @@ func (t *DiskTree[K, V]) RangeSearch(startKey, endKey K) ([]tree.LeafPair[K, V],
 
 	// Traverse leaf nodes and collect results
 	for currentLeaf != nil {
+		// Skip deleted leaf nodes
+		if currentLeaf.IsDeleted() {
+			// Move to next leaf
+			if currentLeaf.GetNextPage() != 0 {
+				nextLeaf, err := t.indexFile.readNode(currentLeaf.GetNextPage())
+				if err != nil {
+					return nil, fmt.Errorf("failed to load next leaf: %w", err)
+				}
+				nextLeafNode, ok := nextLeaf.(*tree.LeafNode[K, V])
+				if !ok {
+					return nil, errors.New("expected leaf node")
+				}
+				currentLeaf = nextLeafNode
+				continue
+			} else {
+				currentLeaf = nil // No more leaves
+				break
+			}
+		}
+
 		for _, pair := range currentLeaf.Pairs {
 			// Check if key is in range [startKey, endKey)
 			if !pair.K.Less(startKey) && pair.K.Less(endKey) {
@@ -384,7 +404,24 @@ func (t *DiskTree[K, V]) Min() (*tree.LeafPair[K, V], error) {
 		return nil, err
 	}
 
-	if len(leftmostLeaf.Pairs) == 0 {
+	// Skip deleted leaf nodes
+	for leftmostLeaf != nil && leftmostLeaf.IsDeleted() {
+		if leftmostLeaf.GetNextPage() != 0 {
+			nextLeaf, err := t.indexFile.readNode(leftmostLeaf.GetNextPage())
+			if err != nil {
+				return nil, fmt.Errorf("failed to load next leaf: %w", err)
+			}
+			nextLeafNode, ok := nextLeaf.(*tree.LeafNode[K, V])
+			if !ok {
+				return nil, errors.New("expected leaf node")
+			}
+			leftmostLeaf = nextLeafNode
+		} else {
+			return nil, errors.New("no non-deleted leaves found")
+		}
+	}
+
+	if leftmostLeaf == nil || len(leftmostLeaf.Pairs) == 0 {
 		return nil, errors.New("leftmost leaf is empty")
 	}
 
@@ -410,7 +447,24 @@ func (t *DiskTree[K, V]) Max() (*tree.LeafPair[K, V], error) {
 		return nil, err
 	}
 
-	if len(rightmostLeaf.Pairs) == 0 {
+	// Skip deleted leaf nodes
+	for rightmostLeaf != nil && rightmostLeaf.IsDeleted() {
+		if rightmostLeaf.GetPrevPage() != 0 {
+			prevLeaf, err := t.indexFile.readNode(rightmostLeaf.GetPrevPage())
+			if err != nil {
+				return nil, fmt.Errorf("failed to load previous leaf: %w", err)
+			}
+			prevLeafNode, ok := prevLeaf.(*tree.LeafNode[K, V])
+			if !ok {
+				return nil, errors.New("expected leaf node")
+			}
+			rightmostLeaf = prevLeafNode
+		} else {
+			return nil, errors.New("no non-deleted leaves found")
+		}
+	}
+
+	if rightmostLeaf == nil || len(rightmostLeaf.Pairs) == 0 {
 		return nil, errors.New("rightmost leaf is empty")
 	}
 
@@ -510,6 +564,12 @@ func (t *DiskTree[K, V]) dfs(key K, node tree.Node[V]) (V, error) {
 		return zero, errors.New("expected a leaf node")
 	}
 
+	// Check if the leaf node is deleted
+	if leaf.IsDeleted() {
+		var zero V
+		return zero, errors.New("key not found (node deleted)")
+	}
+
 	// Binary search in leaf pairs
 	ind := t.leafBinarySearch(key, leaf.Pairs)
 	if ind == -1 {
@@ -571,7 +631,6 @@ func (t *DiskTree[K, V]) upperBound(key K, keys []K) int {
 	return left
 }
 
-
 // insertAt is a helper function to insert an element at a specific index
 func insertAt[T any](slice []T, index int, elem T) []T {
 	if index < 0 || index > len(slice) {
@@ -621,7 +680,11 @@ func (t *DiskTree[K, V]) Print() error {
 
 		// Check if it's a leaf node using type assertion
 		if leaf, ok := item.node.(*tree.LeafNode[K, V]); ok {
-			fmt.Printf("[Page %d: ", item.pageID)
+			deletedStatus := ""
+			if leaf.IsDeleted() {
+				deletedStatus = " [DELETED]"
+			}
+			fmt.Printf("[Page %d%s: ", item.pageID, deletedStatus)
 			for _, pair := range leaf.Pairs {
 				fmt.Printf("(%v: %v) ", pair.K, pair.Value)
 			}
@@ -632,7 +695,11 @@ func (t *DiskTree[K, V]) Print() error {
 			if !ok {
 				return errors.New("expected an internal node")
 			}
-			fmt.Printf("[Page %d: ", item.pageID)
+			deletedStatus := ""
+			if interm.IsDeleted() {
+				deletedStatus = " [DELETED]"
+			}
+			fmt.Printf("[Page %d%s: ", item.pageID, deletedStatus)
 			for _, k := range interm.Keys {
 				fmt.Printf("%v ", k)
 			}
@@ -650,4 +717,537 @@ func (t *DiskTree[K, V]) Print() error {
 	}
 	fmt.Println()
 	return nil
+}
+
+// Delete removes a key-value pair from the disk B+ tree.
+func (t *DiskTree[K, V]) Delete(key K) error {
+	// Check empty
+	rootPageID := t.indexFile.GetRoot()
+	if rootPageID == 0 {
+		return errors.New("tree is empty")
+	}
+
+	// Ensure key exists first (optional but safe)
+	_, err := t.Search(key)
+	if err != nil {
+		return err
+	}
+
+	// Perform recursive delete starting at root
+	underflow, err := t.deleteRecursive(key, rootPageID)
+	if err != nil {
+		return err
+	}
+
+	// Handle root underflow: if root is internal and becomes empty, make its only child the root
+	if underflow {
+		rootNode, err := t.indexFile.readNode(rootPageID)
+		if err != nil {
+			return err
+		}
+		if interm, ok := rootNode.(*tree.IntermNode[K, V]); ok {
+			// If no keys left but has one pointer, promote that child as root
+			if len(interm.Keys) == 0 && len(interm.Pointers) == 1 {
+				if err := t.indexFile.SetRoot(interm.Pointers[0]); err != nil {
+					return err
+				}
+				// Optionally free old root page
+				tryFreePage(t.indexFile, rootPageID)
+			}
+		}
+	}
+
+	return nil
+}
+
+// deleteRecursive deletes key starting at pageID. Returns whether caller (this node) underflows.
+func (t *DiskTree[K, V]) deleteRecursive(key K, pageID uint32) (bool, error) {
+	node, err := t.indexFile.readNode(pageID)
+	if err != nil {
+		return false, err
+	}
+
+	if leaf, ok := node.(*tree.LeafNode[K, V]); ok {
+		return t.deleteFromLeaf(key, leaf, pageID)
+	}
+	return t.deleteFromInternal(key, node.(*tree.IntermNode[K, V]), pageID)
+}
+
+func (t *DiskTree[K, V]) deleteFromLeaf(key K, leaf *tree.LeafNode[K, V], pageID uint32) (bool, error) {
+	// Find the key to delete using exact-match binary search
+	index := t.leafBinarySearch(key, leaf.Pairs)
+	if index == -1 {
+		// Key not found
+		return false, nil
+	}
+
+	// Remove the key-value pair
+	leaf.Pairs = removeAtLeafPair(leaf.Pairs, index)
+
+	// Write the leaf back to disk
+	if err := t.indexFile.writeNode(leaf, pageID); err != nil {
+		return false, err
+	}
+
+	// Check for underflow using same rule as memory version
+	minKeys := (t.order - 1) / 2
+	return len(leaf.Pairs) < minKeys, nil
+}
+
+// deleteFromInternal handles deletion from an internal node.
+func (t *DiskTree[K, V]) deleteFromInternal(key K, interm *tree.IntermNode[K, V], pageID uint32) (bool, error) {
+	// choose child (use same upperBound semantics used elsewhere)
+	childIndex := t.upperBound(key, interm.Keys)
+	if childIndex >= len(interm.Pointers) {
+		return false, errors.New("invalid child index")
+	}
+
+	childPageID := interm.Pointers[childIndex]
+
+	// recurse
+	childUnderflow, err := t.deleteRecursive(key, childPageID)
+	if err != nil {
+		return false, err
+	}
+	if !childUnderflow {
+		// no structural change required; still might need to update separators if we deleted first key from a leaf earlier
+		// but deleteFromLeaf handles updating parents when removing first key and no underflow
+		return false, nil
+	}
+
+	// child underflow -> try borrow or merge
+	return t.handleUnderflow(interm, pageID, childIndex)
+}
+
+// handleUnderflow tries borrow from siblings or merges and returns whether this node underflows.
+func (t *DiskTree[K, V]) handleUnderflow(node *tree.IntermNode[K, V], nodePageID uint32, childIndex int) (bool, error) {
+	// try borrow from left sibling
+	if childIndex > 0 {
+		leftPageID := node.Pointers[childIndex-1]
+		if t.canBorrowFrom(leftPageID) {
+			if err := t.borrowFromLeft(node, nodePageID, childIndex); err != nil {
+				return false, err
+			}
+			if err := t.indexFile.writeNode(node, nodePageID); err != nil {
+				return false, err
+			}
+			return false, nil
+		}
+	}
+
+	// try borrow from right sibling
+	if childIndex < len(node.Pointers)-1 {
+		rightPageID := node.Pointers[childIndex+1]
+		if t.canBorrowFrom(rightPageID) {
+			if err := t.borrowFromRight(node, nodePageID, childIndex); err != nil {
+				return false, err
+			}
+			if err := t.indexFile.writeNode(node, nodePageID); err != nil {
+				return false, err
+			}
+			return false, nil
+		}
+	}
+
+	// can't borrow -> merge
+	// prefer merge with left if exists
+	if childIndex > 0 {
+		// merge child (childIndex) into left sibling (childIndex-1)
+		if err := t.mergeLeft(node, nodePageID, childIndex); err != nil {
+			return false, err
+		}
+		// Remove separator key and pointer for childIndex
+		node.Keys = removeAtK(node.Keys, childIndex-1)
+		node.Pointers = removeAtUint32(node.Pointers, childIndex)
+		// write node
+		if err := t.indexFile.writeNode(node, nodePageID); err != nil {
+			return false, err
+		}
+	} else if childIndex < len(node.Pointers)-1 {
+		// merge right sibling into child
+		if err := t.mergeRight(node, nodePageID, childIndex); err != nil {
+			return false, err
+		}
+		// remove separator key at childIndex and remove right pointer
+		node.Keys = removeAtK(node.Keys, childIndex)
+		node.Pointers = removeAtUint32(node.Pointers, childIndex+1)
+		if err := t.indexFile.writeNode(node, nodePageID); err != nil {
+			return false, err
+		}
+	} else {
+		return false, errors.New("no sibling to merge with; inconsistent state")
+	}
+
+	// check for underflow in this internal node
+	minKeys := (t.order - 1) / 2
+	if len(node.Keys) < minKeys {
+		return true, nil
+	}
+	return false, nil
+}
+
+// canBorrowFrom checks if the node at page has > minKeys (so can lend)
+func (t *DiskTree[K, V]) canBorrowFrom(pageID uint32) bool {
+	n, err := t.indexFile.readNode(pageID)
+	if err != nil {
+		// if we can't read treat as not borrowable
+		return false
+	}
+	if leaf, ok := n.(*tree.LeafNode[K, V]); ok {
+		minKeys := (t.order - 1) / 2
+		return len(leaf.Pairs) > minKeys
+	}
+	if interm, ok := n.(*tree.IntermNode[K, V]); ok {
+		minKeys := (t.order - 1) / 2
+		return len(interm.Keys) > minKeys
+	}
+	return false
+}
+
+// borrowFromLeft borrows one item from left sibling into child at childIndex.
+func (t *DiskTree[K, V]) borrowFromLeft(parent *tree.IntermNode[K, V], parentPageID uint32, childIndex int) error {
+	leftPageID := parent.Pointers[childIndex-1]
+	childPageID := parent.Pointers[childIndex]
+
+	leftNode, err := t.indexFile.readNode(leftPageID)
+	if err != nil {
+		return err
+	}
+	childNode, err := t.indexFile.readNode(childPageID)
+	if err != nil {
+		return err
+	}
+
+	// If leaves
+	if leftLeaf, ok := leftNode.(*tree.LeafNode[K, V]); ok {
+		childLeaf := childNode.(*tree.LeafNode[K, V])
+
+		// move rightmost element from leftLeaf to beginning of childLeaf
+		borrowed := leftLeaf.Pairs[len(leftLeaf.Pairs)-1]
+		leftLeaf.Pairs = leftLeaf.Pairs[:len(leftLeaf.Pairs)-1]
+		childLeaf.Pairs = insertAt(childLeaf.Pairs, 0, borrowed)
+
+		// update parent separator to reflect new smallest key in child
+		parent.Keys[childIndex-1] = childLeaf.Pairs[0].K
+
+		// write modified nodes
+		if err := t.indexFile.writeNode(leftLeaf, leftPageID); err != nil {
+			return err
+		}
+		if err := t.indexFile.writeNode(childLeaf, childPageID); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	// Internal nodes
+	leftInterm := leftNode.(*tree.IntermNode[K, V])
+	childInterm := childNode.(*tree.IntermNode[K, V])
+
+	// move rightmost key/pointer from leftInterm to front of childInterm
+	bKey := leftInterm.Keys[len(leftInterm.Keys)-1]
+	bPtr := leftInterm.Pointers[len(leftInterm.Pointers)-1]
+	leftInterm.Keys = leftInterm.Keys[:len(leftInterm.Keys)-1]
+	leftInterm.Pointers = leftInterm.Pointers[:len(leftInterm.Pointers)-1]
+
+	childInterm.Keys = insertAt(childInterm.Keys, 0, bKey)
+	childInterm.Pointers = insertAtUint32(childInterm.Pointers, 0, bPtr)
+
+	// update parent separator
+	parent.Keys[childIndex-1] = bKey
+
+	// write modified nodes
+	if err := t.indexFile.writeNode(leftInterm, leftPageID); err != nil {
+		return err
+	}
+	if err := t.indexFile.writeNode(childInterm, childPageID); err != nil {
+		return err
+	}
+	return nil
+}
+
+// borrowFromRight borrows one item from right sibling into child at childIndex.
+func (t *DiskTree[K, V]) borrowFromRight(parent *tree.IntermNode[K, V], parentPageID uint32, childIndex int) error {
+	rightPageID := parent.Pointers[childIndex+1]
+	childPageID := parent.Pointers[childIndex]
+
+	rightNode, err := t.indexFile.readNode(rightPageID)
+	if err != nil {
+		return err
+	}
+	childNode, err := t.indexFile.readNode(childPageID)
+	if err != nil {
+		return err
+	}
+
+	// leaves
+	if rightLeaf, ok := rightNode.(*tree.LeafNode[K, V]); ok {
+		childLeaf := childNode.(*tree.LeafNode[K, V])
+
+		// move leftmost element from right to end of child
+		borrowed := rightLeaf.Pairs[0]
+		rightLeaf.Pairs = rightLeaf.Pairs[1:]
+		childLeaf.Pairs = append(childLeaf.Pairs, borrowed)
+
+		// update parent separator to new smallest key in right sibling
+		if len(rightLeaf.Pairs) > 0 {
+			parent.Keys[childIndex] = rightLeaf.Pairs[0].K
+		} else {
+			// right leaf became empty — unusual; handled in merge path usually
+		}
+
+		// write modified nodes
+		if err := t.indexFile.writeNode(rightLeaf, rightPageID); err != nil {
+			return err
+		}
+		if err := t.indexFile.writeNode(childLeaf, childPageID); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	// internal nodes
+	rightInterm := rightNode.(*tree.IntermNode[K, V])
+	childInterm := childNode.(*tree.IntermNode[K, V])
+
+	// move leftmost key/pointer from rightInterm to end of childInterm
+	bKey := rightInterm.Keys[0]
+	bPtr := rightInterm.Pointers[0]
+	rightInterm.Keys = rightInterm.Keys[1:]
+	rightInterm.Pointers = rightInterm.Pointers[1:]
+
+	childInterm.Keys = append(childInterm.Keys, bKey)
+	childInterm.Pointers = append(childInterm.Pointers, bPtr)
+
+	// update parent separator to reflect new smallest in rightInterm
+	if len(rightInterm.Keys) > 0 {
+		parent.Keys[childIndex] = rightInterm.Keys[0]
+	}
+
+	// write modified nodes
+	if err := t.indexFile.writeNode(rightInterm, rightPageID); err != nil {
+		return err
+	}
+	if err := t.indexFile.writeNode(childInterm, childPageID); err != nil {
+		return err
+	}
+	return nil
+}
+
+// mergeLeft merges child at childIndex into left sibling (childIndex-1)
+func (t *DiskTree[K, V]) mergeLeft(parent *tree.IntermNode[K, V], parentPageID uint32, childIndex int) error {
+	leftPageID := parent.Pointers[childIndex-1]
+	childPageID := parent.Pointers[childIndex]
+
+	leftNode, err := t.indexFile.readNode(leftPageID)
+	if err != nil {
+		return err
+	}
+	childNode, err := t.indexFile.readNode(childPageID)
+	if err != nil {
+		return err
+	}
+
+	// If leaves: append child pairs to left leaf
+	if leftLeaf, ok := leftNode.(*tree.LeafNode[K, V]); ok {
+		childLeaf := childNode.(*tree.LeafNode[K, V])
+		leftLeaf.Pairs = append(leftLeaf.Pairs, childLeaf.Pairs...)
+
+		// fix linked list pointers
+		leftLeaf.SetNextPage(childLeaf.GetNextPage())
+		if childLeaf.GetNextPage() != 0 {
+			nextNode, err := t.indexFile.readNode(childLeaf.GetNextPage())
+			if err == nil {
+				if nextLeaf, ok := nextNode.(*tree.LeafNode[K, V]); ok {
+					nextLeaf.SetPrevPage(leftPageID)
+					_ = t.indexFile.writeNode(nextLeaf, childLeaf.GetNextPage())
+				}
+			}
+		}
+
+		// write merged left
+		if err := t.indexFile.writeNode(leftLeaf, leftPageID); err != nil {
+			return err
+		}
+
+		// mark child deleted and try free
+		childLeaf.SetDeleted(true)
+		if err := t.indexFile.writeNode(childLeaf, childPageID); err != nil {
+			return err
+		}
+		tryFreePage(t.indexFile, childPageID)
+		return nil
+	}
+
+	// internal nodes: move separator key and child's keys/pointers
+	leftInterm := leftNode.(*tree.IntermNode[K, V])
+	childInterm := childNode.(*tree.IntermNode[K, V])
+
+	separator := parent.Keys[childIndex-1]
+	leftInterm.Keys = append(leftInterm.Keys, separator)
+	leftInterm.Keys = append(leftInterm.Keys, childInterm.Keys...)
+	leftInterm.Pointers = append(leftInterm.Pointers, childInterm.Pointers...)
+
+	if err := t.indexFile.writeNode(leftInterm, leftPageID); err != nil {
+		return err
+	}
+
+	childInterm.SetDeleted(true)
+	if err := t.indexFile.writeNode(childInterm, childPageID); err != nil {
+		return err
+	}
+	tryFreePage(t.indexFile, childPageID)
+	return nil
+}
+
+// mergeRight merges right sibling into child at childIndex
+func (t *DiskTree[K, V]) mergeRight(parent *tree.IntermNode[K, V], parentPageID uint32, childIndex int) error {
+	childPageID := parent.Pointers[childIndex]
+	rightPageID := parent.Pointers[childIndex+1]
+
+	childNode, err := t.indexFile.readNode(childPageID)
+	if err != nil {
+		return err
+	}
+	rightNode, err := t.indexFile.readNode(rightPageID)
+	if err != nil {
+		return err
+	}
+
+	// leaves: append right pairs into child
+	if childLeaf, ok := childNode.(*tree.LeafNode[K, V]); ok {
+		rightLeaf := rightNode.(*tree.LeafNode[K, V])
+		childLeaf.Pairs = append(childLeaf.Pairs, rightLeaf.Pairs...)
+
+		// fix linked list pointers
+		childLeaf.SetNextPage(rightLeaf.GetNextPage())
+		if rightLeaf.GetNextPage() != 0 {
+			nextNode, err := t.indexFile.readNode(rightLeaf.GetNextPage())
+			if err == nil {
+				if nextLeaf, ok := nextNode.(*tree.LeafNode[K, V]); ok {
+					nextLeaf.SetPrevPage(childPageID)
+					_ = t.indexFile.writeNode(nextLeaf, rightLeaf.GetNextPage())
+				}
+			}
+		}
+
+		// write merged child
+		if err := t.indexFile.writeNode(childLeaf, childPageID); err != nil {
+			return err
+		}
+
+		// mark right deleted and try free
+		rightLeaf.SetDeleted(true)
+		if err := t.indexFile.writeNode(rightLeaf, rightPageID); err != nil {
+			return err
+		}
+		tryFreePage(t.indexFile, rightPageID)
+		return nil
+	}
+
+	// internal nodes
+	childInterm := childNode.(*tree.IntermNode[K, V])
+	rightInterm := rightNode.(*tree.IntermNode[K, V])
+
+	separator := parent.Keys[childIndex]
+	childInterm.Keys = append(childInterm.Keys, separator)
+	childInterm.Keys = append(childInterm.Keys, rightInterm.Keys...)
+	childInterm.Pointers = append(childInterm.Pointers, rightInterm.Pointers...)
+
+	if err := t.indexFile.writeNode(childInterm, childPageID); err != nil {
+		return err
+	}
+
+	rightInterm.SetDeleted(true)
+	if err := t.indexFile.writeNode(rightInterm, rightPageID); err != nil {
+		return err
+	}
+	tryFreePage(t.indexFile, rightPageID)
+	return nil
+}
+
+// replaceKeyInParent searches from root and replaces first occurrence of oldKey that separates to childPageID with newKey.
+func (t *DiskTree[K, V]) replaceKeyInParent(childPageID uint32, oldKey, newKey K) error {
+	rootID := t.indexFile.GetRoot()
+	if rootID == 0 {
+		return errors.New("empty tree")
+	}
+
+	// BFS/DFS to find parent that has pointer to childPageID
+	var stack []uint32
+	stack = append(stack, rootID)
+	for len(stack) > 0 {
+		p := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		n, err := t.indexFile.readNode(p)
+		if err != nil {
+			return err
+		}
+		interm, ok := n.(*tree.IntermNode[K, V])
+		if !ok {
+			continue
+		}
+		// check pointers
+		for i, ptr := range interm.Pointers {
+			if ptr == childPageID {
+				// if separator to the right exists and equals oldKey, replace
+				// The separator key that separates left ptr i and right ptr i+1 is interm.Keys[i]
+				if i > 0 && i-1 < len(interm.Keys) && interm.Keys[i-1].Equal(oldKey) {
+					interm.Keys[i-1] = newKey
+					return t.indexFile.writeNode(interm, p)
+				}
+				// also check if i < len(Keys) and Keys[i] equals oldKey (case when child is left pointer)
+				if i < len(interm.Keys) && interm.Keys[i].Equal(oldKey) {
+					interm.Keys[i] = newKey
+					return t.indexFile.writeNode(interm, p)
+				}
+			}
+		}
+		// push children to stack
+		for _, ptr := range interm.Pointers {
+			stack = append(stack, ptr)
+		}
+	}
+	return nil
+}
+
+// tryFreePage attempts to free a page via indexFile.FreePage if available, else marks the node deleted.
+func tryFreePage(indexFile any, pageID uint32) {
+	if f, ok := indexFile.(interface{ FreePage(uint32) error }); ok {
+		_ = f.FreePage(pageID)
+	}
+}
+
+// ---------- small helpers for slice removal/insert on concrete types ----------
+
+func removeAtLeafPair[K tree.Key, V any](s []tree.LeafPair[K, V], i int) []tree.LeafPair[K, V] {
+	if i < 0 || i >= len(s) {
+		return s
+	}
+	return append(s[:i], s[i+1:]...)
+}
+
+func removeAtK[K tree.Key](s []K, i int) []K {
+	if i < 0 || i >= len(s) {
+		return s
+	}
+	return append(s[:i], s[i+1:]...)
+}
+
+func removeAtUint32(s []uint32, i int) []uint32 {
+	if i < 0 || i >= len(s) {
+		return s
+	}
+	return append(s[:i], s[i+1:]...)
+}
+
+func insertAtUint32(s []uint32, i int, v uint32) []uint32 {
+	if i < 0 || i > len(s) {
+		return s
+	}
+	res := make([]uint32, len(s)+1)
+	copy(res[:i], s[:i])
+	res[i] = v
+	copy(res[i+1:], s[i:])
+	return res
 }

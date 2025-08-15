@@ -120,6 +120,60 @@ func main() {
 		fmt.Printf("Maximum key: %d with value: %s\n", maxPair.K, maxPair.Value)
 	}
 
+	fmt.Println("\n=== Testing Delete Operations ===")
+
+	// Test deletion of existing keys
+	deleteTests := []tree.IntKey{15, 5, 25}
+	for _, deleteKey := range deleteTests {
+		fmt.Printf("Deleting key %d...\n", deleteKey)
+		if err := diskTree.Delete(deleteKey); err != nil {
+			fmt.Printf("Delete %d failed: %v\n", deleteKey, err)
+		} else {
+			fmt.Printf("Successfully deleted key %d\n", deleteKey)
+		}
+	}
+
+	// Try to delete a non-existent key
+	if err := diskTree.Delete(tree.IntKey(100)); err != nil {
+		fmt.Printf("Delete 100 failed (expected): %v\n", err)
+	} else {
+		fmt.Println("Unexpectedly deleted key 100")
+	}
+
+	// Print tree after deletions
+	fmt.Println("\nTree after deletions:")
+	if err := diskTree.Print(); err != nil {
+		log.Printf("Failed to print tree after deletions: %v", err)
+	}
+
+	// Test search after deletion
+	fmt.Println("\n=== Testing Search After Deletion ===")
+	searchAfterDeleteTests := []tree.IntKey{15, 5, 25, 10, 1}
+	for _, searchKey := range searchAfterDeleteTests {
+		val, err := diskTree.Search(searchKey)
+		if err != nil {
+			fmt.Printf("Search %d after deletion → not found: %v\n", searchKey, err)
+		} else {
+			fmt.Printf("Search %d after deletion → found: %s\n", searchKey, val)
+		}
+	}
+
+	// Test Min/Max after deletion
+	fmt.Println("\n=== Testing Min/Max After Deletion ===")
+	minPairAfter, err := diskTree.Min()
+	if err != nil {
+		fmt.Printf("Min operation after deletion failed: %v\n", err)
+	} else {
+		fmt.Printf("Minimum key after deletion: %d with value: %s\n", minPairAfter.K, minPairAfter.Value)
+	}
+
+	maxPairAfter, err := diskTree.Max()
+	if err != nil {
+		fmt.Printf("Max operation after deletion failed: %v\n", err)
+	} else {
+		fmt.Printf("Maximum key after deletion: %d with value: %s\n", maxPairAfter.K, maxPairAfter.Value)
+	}
+
 	fmt.Println("\n=== Testing Tree Persistence ===")
 
 	// Close the current tree
