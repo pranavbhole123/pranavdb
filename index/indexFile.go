@@ -131,7 +131,7 @@ func (idx *IndexFile[K, V]) allocatePage() (uint32, error) {
 	freeHead := idx.firstFreePage
 
 	//fmt.Print("freehead ******************************************************")
-	fmt.Println(freeHead)
+	//fmt.Println(freeHead)
 	// 2. If there is a free page, reuse it
 	if freeHead != 0 { 
 		// Read next free page pointer from that page
@@ -171,7 +171,7 @@ func (idx *IndexFile[K, V]) allocatePage() (uint32, error) {
 func (idx *IndexFile[K, V]) freePage(pageID uint32) error {
 	// build page buffer
 	//fmt.Print("pageid ******************************************************")
-	fmt.Println(pageID)
+	//fmt.Println(pageID)
 	buf := make([]byte, page.PageSize)
 
 	// mark as deleted

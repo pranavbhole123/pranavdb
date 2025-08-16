@@ -6,6 +6,7 @@ import (
 	"os"
 	"pranavdb/index"
 	"pranavdb/tree"
+	"pranavdb/data"
 )
 
 func main() {
@@ -176,9 +177,9 @@ func main() {
 	// now we test the working of our free list try inserting 31 and if the pageid 2 is use we kknow our free list is working
 
 	_ = existingTree.Insert(tree.IntKey(31), "thirtyone")
-	_ = existingTree.Insert(tree.IntKey(32), "thirtyone")
-	_ = existingTree.Insert(tree.IntKey(33), "thirtyone")
-	err = existingTree.Insert(tree.IntKey(34), "thirtyone")
+	_ = existingTree.Insert(tree.IntKey(32), "thirtytwo")
+	_ = existingTree.Insert(tree.IntKey(33), "thirtythree")
+	err = existingTree.Insert(tree.IntKey(34), "thirtyfour")
 
 	if err != nil{
 		fmt.Println(err)
@@ -187,6 +188,108 @@ func main() {
 		log.Printf("Failed to print reopened tree: %v", err)
 	}
 	fmt.Println("\n=== All Tests Completed Successfully! ===")
+
+
+	//////////////////////////////////////////////////////////////////////////////////////////////////row
+
+	const fn = "test_rows.dat"
+
+	// clean up old test file if present
+	_ = os.Remove(fn)
+
+	// create rowfile with schema: int, string, float
+	rf, err := data.NewRowfile(fn, "int,string,float")
+	if err != nil {
+		log.Fatalf("NewRowfile failed: %v", err)
+	}
+	defer rf.Close()
+	fmt.Printf("Created rowfile %q with schema: %s (columns: %d)\n",
+		fn, data.SchemaStringFromCodes(rf.GetSchemaCodes()), rf.GetColumnCount())
+
+	// prepare rows (values must match schema exactly: int, string, float64)
+	rows := [][]any{
+		{42, "hello", 3.14159},
+		{7, "world", 2.71828},
+		{1000, "this is a longer string", 1.41421},
+	}
+
+	var offsets []int64
+	for i, r := range rows {
+		off, err := rf.WriteRow(r)
+		if err != nil {
+			log.Fatalf("WriteRow #%d failed: %v", i, err)
+		}
+		fmt.Printf("Wrote row #%d at offset %d\n", i, off)
+		offsets = append(offsets, off)
+	}
+
+	// Read back rows immediately
+	fmt.Println("\nReading back rows (immediate):")
+	for i, off := range offsets {
+		vals, err := rf.ReadRowAt(off)
+		if err != nil {
+			log.Fatalf("ReadRowAt #%d failed: %v", i, err)
+		}
+		// decodeRow returns int32 for INT, float64 for FLOAT, string for STRING
+		ival := vals[0].(int32)
+		sval := vals[1].(string)
+		fval := vals[2].(float64)
+		fmt.Printf("Row #%d @%d -> int=%d, string=%q, float=%f\n", i, off, int(ival), sval, fval)
+	}
+	// ✅ DELETE one row
+	fmt.Printf("\nDeleting row #1 at offset %d...\n", offsets[1])
+	if err := rf.FreeRowAt(offsets[1]); err != nil {
+		log.Fatalf("FreeRowAt failed: %v", err)
+	}
+
+//fmt.Printf("Before insertion, firstFreePage = %d\n", rf.GetFirstFreePage())
+	// ✅ INSERT a new row (should reuse the freed slot)
+	//// keep in mind the row to be inserted should be shorter than the row deleted  ///////////////////////////////////////////////////////
+	newRow := []any{99, "r", 1.0}
+	newOff, err := rf.WriteRow(newRow)
+	if err != nil {
+		log.Fatalf("WriteRow (after delete) failed: %v", err)
+	}
+	fmt.Printf("Inserted new row into offset %d (should match deleted slot %d)\n", newOff, offsets[1])
+
+	// ✅ READ BACK the reused slot
+	vals, err := rf.ReadRowAt(newOff)
+	if err != nil {
+		log.Fatalf("ReadRowAt (reused slot) failed: %v", err)
+	}
+	fmt.Printf("Reused slot row @%d -> int=%d, string=%q, float=%f\n",
+		newOff, vals[0].(int32), vals[1].(string), vals[2].(float64))
+
+	fmt.Println("\nAll tests completed successfully.")
+
+
+	// Close and reopen to test persistence + header reading
+	if err := rf.Close(); err != nil {
+		log.Fatalf("close failed: %v", err)
+	}
+
+	rf2, err := data.OpenRowfile(fn)
+	if err != nil {
+		log.Fatalf("OpenRowfile failed: %v", err)
+	}
+	defer rf2.Close()
+	fmt.Printf("\nReopened rowfile %q with schema: %s (columns: %d)\n",
+		fn, data.SchemaStringFromCodes(rf2.GetSchemaCodes()), rf2.GetColumnCount())
+
+	// Read rows again after reopen
+	fmt.Println("\nReading back rows (after reopen):")
+	for i, off := range offsets {
+		vals, err := rf2.ReadRowAt(off)
+		if err != nil {
+			log.Fatalf("ReadRowAt after reopen #%d failed: %v", i, err)
+		}
+		ival := vals[0].(int32)
+		sval := vals[1].(string)
+		fval := vals[2].(float64)
+		fmt.Printf("Row #%d @%d -> int=%d, string=%q, float=%f\n", i, off, int(ival), sval, fval)
+	}
+
+	fmt.Println("\nAll tests completed successfully.")
 }
 
 func getFileSize(filename string) int64 {
