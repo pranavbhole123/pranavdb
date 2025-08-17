@@ -153,7 +153,3 @@ There are a few test/demo artifacts in the repo:
 * Background vacuum/compaction to defragment row files (reclaim fragmented free space and rewrite indexes).
 
 ---
-
-
-
-Which would you like next?
