@@ -6,7 +6,7 @@
 
 ---
 
-## What this repo contains (glazed summary)
+## What this repo contains
 
 1. **Disk-based B+-tree index**
 
@@ -147,9 +147,7 @@ There are a few test/demo artifacts in the repo:
 ## Next steps / roadmap (what I’m working on)
 
 * Complete lexer + parser to accept simple SQL (`CREATE TABLE`, `INSERT`, `SELECT ... WHERE`, `DELETE`).
-* Finish B+-tree: node splitting and full internal node support (right now code demonstrates basic leaf operations).
 * Add a simple planner that chooses index vs full-scan, and implement basic WHERE predicates (`=`, `>`, `<`, ranges`, `AND\`).
-* WAL (write-ahead log) and crash-recovery for durability.
 * Background vacuum/compaction to defragment row files (reclaim fragmented free space and rewrite indexes).
 
 ---
